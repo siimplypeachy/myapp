@@ -1,7 +1,7 @@
 var dbSize = 5 * 1024 * 1024;
 var db;
-
 var map;
+var baseUrl = "http://vanapi.gitsql.net";
 
 function initMap() {
   map = new google.maps.Map(document.getElementById('map'), {
@@ -10,8 +10,26 @@ function initMap() {
   });
 }
 
+function encodeImageUri(imageUri)
+{
+     var c=document.createElement('canvas');
+     var ctx=c.getContext("2d");
+     var img=new Image();
+     img.onload = function(){
+       c.width=this.width;
+       c.height=this.height;
+       ctx.drawImage(img, 0,0);
+     };
+     img.src=imageUri;
+     var dataURL = c.toDataURL("image/jpeg");
+     return dataURL;
+}
 
-
+async function asyncForEach(array, callback) {
+    for (let index = 0; index < array.length; index++) {
+      await callback(array[index], index, array);
+    }
+}
 
 var app = {
 
@@ -29,6 +47,18 @@ var app = {
     
     receivedEvent: function(readyText) {
 
+        db = openDatabase("contactapp", "1", "Contact App", dbSize);
+
+        db.transaction(function(tx){
+            tx.executeSql("CREATE TABLE IF NOT EXISTS " +
+                    "contacts(ID INTEGER PRIMARY KEY ASC, strFullName, strEmail, strPhone, strPicture, lat, long, serverId, strColor)");
+        });
+        
+        db.transaction(function(tx) {
+            tx.executeSql("CREATE TABLE IF NOT EXISTS " +
+                    "phonebook(ID INTEGER PRIMARY KEY ASC, strFullName, strPhone)");
+        });
+        
         function onGeoSuccess(position) {
             let coords = { 'lat': position.coords.latitude, 'long': position.coords.longitude };
             localStorage.setItem('currentPosition', JSON.stringify(coords));
@@ -54,9 +84,9 @@ var app = {
         }
 
         // Options: throw an error if no update is received every 30 seconds.
-        geoOpts = { maximumAge: 0, timeout: 5000, enableHighAccuracy: true};
-        var watchID = navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, geoOpts);
-        
+        geoOpts = { maximumAge: 3000, timeout: 5000, enableHighAccuracy: true};
+        // var watchID = navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, geoOpts);
+
         var options = new ContactFindOptions();
         options.filter="";          // empty search string returns all contacts
         options.multiple=true;      // return multiple results
@@ -65,13 +95,20 @@ var app = {
         // find contacts
         navigator.contacts.find(filter, onSuccess, onError, options);
 
+
         // onSuccess: Get a snapshot of the current contacts
         //
         function onSuccess(contacts) {
             for (var i=0; i<contacts.length; i++) {
                 if (contacts[i].phoneNumbers) {  // many contacts don't have displayName
-                    console.log(contacts[i].phoneNumbers);
-                    insertPhonebookRow(contacts[i].displayName, contacts[i].phoneNumbers[0].value);
+                    let name = contacts[i].displayName;
+                    try {
+                        name = contacts[i].name.givenName;
+                    }
+                    catch{
+                        console.log('Unable to find givenName')
+                    }
+                    insertPhonebookRow(name, contacts[i].phoneNumbers[0].value); 
                     if (i == 20) break;
                 }
             }
@@ -91,7 +128,7 @@ var app = {
 
                 var len = results.rows.length, i;
                 for (i = 0; i < len; i++) {
-                    list.append(`<li><a class="editContact" data-id="${results.rows[i].ID}">${results.rows[i].strFullName}</li>`);
+                    list.append(`<li><a class="editContact" data-id="${results.rows.item(i).ID}">${results.rows.item(i).strFullName} / ${results.rows.item(i).strColor}</li>`);
                 }
 
                 $("#contactListLi").listview("refresh");
@@ -109,7 +146,7 @@ var app = {
 
                 var len = results.rows.length, i;
                 for (i = 0; i < len; i++) {
-                    list.append(`<li><a class="listy" data-id="${results.rows[i].ID}">${results.rows[i].strFullName}</li>`);
+                    list.append(`<li><a class="copyPhoneContact" data-id="${results.rows.item(i).ID}">${results.rows.item(i).strFullName}</li>`);
                 }
 
                 $("#phoneContactsListLi").listview("refresh");
@@ -117,40 +154,73 @@ var app = {
             });
 
         }
-        async function insertRow(field1, field2){
-            return new Promise(function(resolve, reject){
-                db = openDatabase("contactapp", "1", "Contact App", dbSize);
-    
-                db.transaction(function(tx) {
-                    tx.executeSql("CREATE TABLE IF NOT EXISTS " +
-                            "contacts(ID INTEGER PRIMARY KEY ASC, strFullName, strEmail, strPhone, strPicture)");
-                });
-    
-                // save our form to websql
-                db.transaction(function(tx){
-                    let contactName = field1;
-                    let contactEmail = field2;
-                    tx.executeSql(`INSERT INTO contacts(strFullName, strEmail) VALUES (?,?)`, [contactName, contactEmail], (tx, res)=>{
-                        console.log(res);
-                        resolve(res);
-                    });  
-                });
-            });
-            
+        async function insertRow(field1, field2, field3, serverId = '', initial=false){
+            return new Promise( async function(resolve, reject){
+                let newRecord=true;
+                let lat ='', long ='';
+                            
+                /*try {
+                    ({lat, long} = JSON.parse(localStorage.getItem('currentPosition')));
+                } catch (err){
+                    // Looks like we have no currentPosition 
+                    console.log(err);
+                }*/
+
+                if (serverId !==''){
+                    let dupe = await checkDupeServerId(serverId);
+                    if (dupe ) {
+                        resolve();
+                        newRecord = false;
+                    }
+                }
+
+                if(newRecord){
+                    // save our form to websql
+                    db.transaction(function(tx){
+                        tx.executeSql(`INSERT INTO contacts(strFullName, strEmail, lat, long, serverId, strColor) VALUES (?,?,?,?,?,?)`, [field1, field2, lat, long, serverId, field3], async (tx, res)=>{
+                            console.log(res);
+                            if(initial == false){
+                                $.ajax({
+                                    type: "POST",
+                                    url: `${baseUrl}/contacts`,
+                                    contentType: "application/json; charset=utf-8",
+                                    dataType: "json",
+                                    data:  JSON.stringify({
+                                        firstName: field1,
+                                        lastName: '',
+                                        contactNumber: field2
+                                    
+                                    }),
+                                    beforeSend: function(xhr){xhr.setRequestHeader('authtoken', localStorage.getItem('token'))},
+                                    success: function(response) {
+                                        db.transaction(function(tx){
+                                            tx.executeSql(`update contacts set serverId = ? where id = ?`, [response.id, res.insertId], 
+                                            (tx, result)=>{
+                                                console.log(result);
+                                                resolve(result);
+                                            });
+                                        });
+                                    },
+                                    error: function(e) {
+                                        alert('Error: ' + e.message);
+                                    }
+                                });
+                            }
+                        });  
+                    });
+                }
+            }); 
         }
 
-        async function insertPhonebookRow(field1, field2){
+        
+
+        async function insertPhonebookRow(field1, field2, field3){
             return new Promise(function(resolve, reject){
-                db = openDatabase("contactapp", "1", "Contact App", dbSize);
-    
-                db.transaction(function(tx) {
-                    tx.executeSql("CREATE TABLE IF NOT EXISTS " +
-                            "phonebook(ID INTEGER PRIMARY KEY ASC, strFullName, strPhone)");
-                });
+                
     
                 // save our form to websql
                 db.transaction(function(tx){
-                    tx.executeSql(`INSERT INTO phonebook(strFullName, strPhone) VALUES (?,?)`, [field1, field2], (tx, res)=>{
+                    tx.executeSql(`INSERT INTO phonebook(strFullName, strPhone, strColor) VALUES (?,?)`, [field1, field2, field3], (tx, res)=>{
                         console.log(res);
                         resolve(res);
                     });  
@@ -164,10 +234,12 @@ var app = {
                 tx.executeSql("SELECT * FROM contacts",[], async (tx, results)=>{
                     await displayContacts(null, results);
                     $(".editContact").bind( "tap", async (event) =>{
-                        let record = await fetchRowFromContacts(event.currentTarget.attributes.getNamedItem('data-id').value);
+                        let record = await fetchRowFromContacts(event.target.getAttribute('data-id'));
                         $("#editContactId").val(record.ID);
+                        $("#editContactServerId").val(record.serverId);
                         $("#editContactName").val(record.strFullName);
                         $("#editContactEmail").val(record.strEmail);
+                        $("#editContactColor").val(record.strColor);
                         $("body").pagecontainer("change", "#editContactPage");
                     });
                 });
@@ -179,35 +251,170 @@ var app = {
                 db = openDatabase("contactapp", "1", "Contact App", dbSize);
                 db.transaction(function(tx){
                     tx.executeSql(`SELECT * FROM contacts where ID = ?`,[id], (tx, results)=>{
-                        resolve(results.rows[0]);
+                        resolve(results.rows.item(0));
                     });
                 });
             });
         }
 
-        async function fetchRowFromPhonebook(id){
+        async function deleteContactFromDBandCloud(id, serverId){
+            return new Promise((resolve, reject)=>{
+                db = openDatabase("contactapp", "1", "Contact App", dbSize);
+                db.transaction(function(tx){
+                    tx.executeSql(`delete FROM contacts where ID = ?`,[id], (tx, results)=>{
+                        $.ajax({
+                            type: "DELETE",
+                            url: `${baseUrl}/contacts/${serverId}`,
+                            contentType: "application/json; charset=utf-8",
+                            beforeSend: function(xhr){xhr.setRequestHeader('authtoken', localStorage.getItem('token'))},
+                            success: function(response) {
+                                console.log(response);
+                                resolve();
+                            },
+                            error: function(e) {
+                                alert('Error: ' + e.message);
+                            }
+                        });
+                    });
+                });
+            });
+        }
+
+        async function checkDupeServerId(serverId){
+            return new Promise((resolve, reject)=>{
+                db = openDatabase("contactapp", "1", "Contact App", dbSize);
+                db.transaction(function(tx){
+                    tx.executeSql(`SELECT * FROM contacts where serverId = ?`,[serverId], (tx, results)=>{
+                        if(results.rows.length>0){
+                            resolve(true);
+                        }else{
+                            resolve(false);
+                        }
+                    });
+                });
+            });
+        }
+
+        async function fetchRowFromPhoneContacts(id){
             return new Promise((resolve, reject)=>{
                 db = openDatabase("contactapp", "1", "Contact App", dbSize);
                 db.transaction(function(tx){
                     tx.executeSql(`SELECT * FROM phonebook where ID = ?`,[id], (tx, results)=>{
-                        resolve(results.rows[0]);
+                        resolve(results.rows.item(0));
                     });
                 });
             });
         }
 
-        async function updateContactsRow(data){
+        async function updateContactsRow(data, serverId=''){
             return new Promise((resolve, reject) =>{
                 db = openDatabase("contactapp", "1", "Contact App", dbSize);
                 db.transaction( (tx) =>{
-                    tx.executeSql('UPDATE contacts SET strFullName=?, strEmail= ? WHERE id=?', [data.strFullName, data.strEmail, data.id], (tx, res) =>{
-                        resolve(res);
+                    tx.executeSql('UPDATE contacts SET strFullName=?, strEmail= ?, strColor=? WHERE id=?', [data.strFullName, data.strEmail, data.strColor, data.id], (tx, res) =>{
+
+                        if(serverId !== ''){
+                            $.ajax({
+                                type: "PUT",
+                                url: `${baseUrl}/contacts/${serverId}`,
+                                contentType: "application/json; charset=utf-8",
+                                dataType: "json",
+                                data:  JSON.stringify({
+                                    id: serverId,
+                                    firstName: data.strFullName,
+                                    lastName: '',
+                                    contactNumber: data.strEmail
+                                }),
+                                beforeSend: function(xhr){xhr.setRequestHeader('authtoken', localStorage.getItem('token'))},
+                                success: function(response) {
+                                    resolve(res);
+                                },
+                                error: function(e) {
+                                    alert('Error: ' + e.message);
+                                }
+                            });
+                        } else{
+                            resolve(res);
+                        }
                     });
                 });
             });
         }
 
         $(document).ready(function(){     
+            $("#saveNewContact").bind( "tap", tapHandler );
+            $("#saveEditContact").bind( "tap", saveEditHandler );
+            $("#captureSelfie").bind( "tap", captureSelfie );
+            $("#cleanupSelfies").bind( "tap", cleanUpTempPhotos );
+            $("#loginButton").bind( "tap", performLogin);
+            $("#initialSync").bind( "tap", initialSync);
+            $("#deleteContact").bind( "tap", deleteContact);
+
+            function initialSync(){
+                $.ajax({
+                    type: "GET",
+                    url: `${baseUrl}/contacts`,
+                    contentType: "application/json; charset=utf-8",
+                    dataType: "json",
+                    beforeSend: function(xhr){xhr.setRequestHeader('authtoken', localStorage.getItem('token'))},
+                    success: function(response) {
+                        console.log(response);
+                        asyncForEach(response, async (record) => {
+                            await insertRow(record.firstName, record.contactNumber, '', record.id, true);
+                        });
+                        
+                        openDBandLoadContacts();
+                    },
+                    error: function(e) {
+                        alert('Error: ' + e.message);
+                    }
+                }); 
+            }
+            function performLogin(){
+                data = {
+                    "username": $("#username").val(),
+                    "password": $("#password").val()
+                }
+
+                $.ajax({
+                    type: "POST",
+                    url: `${baseUrl}/auth`,
+                    data: JSON.stringify(data),
+                    contentType: "application/json; charset=utf-8",
+                    dataType: "json",
+                    success: function(response) {
+                        console.log(response);
+                        localStorage.setItem('token', response.token);
+                        $("body").pagecontainer("change", "#home");
+                    },
+                    error: function(e) {
+                        alert('Error: ' + e.message);
+                    }
+                });
+            }
+
+            openDBandLoadContacts();
+
+            async function tapHandler( event ){
+                await insertRow($("#contactName").val(), $("#contactEmail").val(), $("#contactColor").val());
+                $("body").pagecontainer("change", "#home");
+            }
+
+            async function saveEditHandler (event){
+                let result = await updateContactsRow({
+                    'id': $('#editContactId').val(), 
+                    'strFullName': $('#editContactName').val(), 
+                    'strEmail': $('#editContactEmail').val(),
+                    'strColor': $('#editContactColor').val(),
+                }, $('#editContactServerId').val());
+                $("body").pagecontainer("change", "#home");
+            }
+            
+            async function deleteContact (event){
+                // delete contact from webSQl db
+                // send delete ajax to remove it from the server too
+                await deleteContactFromDBandCloud($('#editContactId').val(), $('#editContactServerId').val());
+                $("body").pagecontainer("change", "#home");
+            }
 
             function captureSelfie(){
 
@@ -227,27 +434,13 @@ var app = {
                 function onFail(message) {
                     alert('Failed because: ' + message);
                 }
-            } 
+            }
 
-            function encodeImageUri(imageUri)
-{
-     var c=document.createElement('canvas');
-     var ctx=c.getContext("2d");
-     var img=new Image();
-     img.onload = function(){
-       c.width=this.width;
-       c.height=this.height;
-       ctx.drawImage(img, 0,0);
-     };
-     img.src=imageUri;
-     var dataURL = c.toDataURL("image/jpeg");
-     return dataURL;
-}
-  function cleanUpTempPhotos() {
+            function cleanUpTempPhotos() {
                 navigator.camera.cleanup(onSuccess, onFail);
 
                 function onSuccess() {
-                    alert("Camera cleanup success.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+                    alert("Camera cleanup success.")
                 }
 
                 function onFail(message) {
@@ -255,27 +448,6 @@ var app = {
                 }
             }
 
-            $("#saveNewContact").bind( "tap", tapHandler );
-            $("#saveEditContact").bind( "tap", saveEditHandler );
-            $("#captureSelfie").bind( "tap", captureSelfie );
-            $("#cleanupSelfies").bind( "tap", cleanUpTempPhotos );
-
-            openDBandLoadContacts();
-
-            async function tapHandler( event ){
-                await insertRow($("#contactName").val(), $("#contactEmail").val());
-                $("body").pagecontainer("change", "#home");
-            }
-
-            async function saveEditHandler (event){
-                let result = await updateContactsRow({
-                    'id': $('#editContactId').val(), 
-                    'strFullName': $('#editContactName').val(), 
-                    'strEmail': $('#editContactEmail').val()
-                });
-                $("body").pagecontainer("change", "#home");
-            }
-        
             $(document).on( 'pagebeforeshow' , '#home' ,function(event){
                 openDBandLoadContacts();
             }); 
@@ -285,17 +457,64 @@ var app = {
                 db.transaction(function(tx){
                     tx.executeSql("SELECT * FROM phonebook",[], async (tx, results)=>{
                         await displayPhoneContacts(null, results);
-
-                        $('.listy').bind( "tap", async (event) => {
-                            let record = await fetchRowFromPhonebook(event.target.getAttribute('data-id'));
-                            await insertRow(record.strFullName, record.strPhone);
+                        debugger;
+                        $(".copyPhoneContact").bind( "tap", async (event) =>{
+                            let record = await fetchRowFromPhoneContacts(event.target.getAttribute('data-id'));
+                            await insertRow(record.strFullName, record.strPhone, '');
                             $("body").pagecontainer("change", "#home");
-                        })
+                        });
                     });
                 });
             });
-            
-       
         });
     }
 };
+
+// GAME
+
+var myGamePiece;
+    
+function startGame()
+{
+    myGameArea.start();
+    myGamePiece = new Component(30, 30, "lightblue", 10, 120);
+}
+
+var myGameArea = {
+    canvas: document.getElementById("mycanvas"),
+    start: function(){
+        var w = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+        var h = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+        this.canvas.width = w;
+        this.canvas.height = h;
+        this.context = this.canvas.getContext("2d");
+        //document.body.insertBefore(this.canvas, document.body.childNodes[0]);
+        this.interval = setInterval(updateGameArea, 20);
+    },
+    clear : function() {
+        this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+};
+
+function Component(width, height, color, x, y) {
+    this.width = width;
+    this.height = height;
+    this.x = x;
+    this.y = y;
+    
+    
+    this.update = function()
+    {
+        ctx = myGameArea.context;
+        ctx.fillStyle = color;
+        ctx.fillRect(this.x, this.y, this.width, this.height);    
+    }
+}
+
+function updateGameArea()
+{
+    myGameArea.clear();
+    myGamePiece.x += 1;
+    myGamePiece.update();
+}
+
